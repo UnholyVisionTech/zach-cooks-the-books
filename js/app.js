@@ -545,6 +545,15 @@ const recipes = {
 };
 
 /* ═══════════════════════════════════════════════════════
+   SUPABASE
+═══════════════════════════════════════════════════════ */
+const { createClient } = supabase;
+const db = createClient(
+  'https://nnwovviyrpyagjbtmjrs.supabase.co',
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5ud292dml5cnB5YWdqYnRtanJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIwNjE2MzMsImV4cCI6MjA4NzYzNzYzM30.cuOhoDPpgtHixUbL55SbbccNlR6-zu7J8w7VxFPNI0g'
+);
+
+/* ═══════════════════════════════════════════════════════
    TESTIMONIALS / QUOTES
 ═══════════════════════════════════════════════════════ */
 const testimonials = [
@@ -616,40 +625,43 @@ function updateReactionButtons(recipeId) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   COMMENTS
+   COMMENTS  (Supabase — shared across all visitors)
 ═══════════════════════════════════════════════════════ */
-function getComments(recipeId) {
-  try {
-    return JSON.parse(localStorage.getItem('zctb_comments_' + recipeId)) || [];
-  } catch { return []; }
-}
-
 function escapeHtml(str) {
   const d = document.createElement('div');
   d.appendChild(document.createTextNode(str));
   return d.innerHTML;
 }
 
-function renderComments(recipeId) {
+async function renderComments(recipeId) {
   const list = document.getElementById('comments-list-' + recipeId);
   if (!list) return;
-  const comments = getComments(recipeId);
-  if (comments.length === 0) {
+
+  list.innerHTML = '<p class="no-comments">Loading comments...</p>';
+
+  const { data, error } = await db
+    .from('comments')
+    .select('*')
+    .eq('recipe_id', recipeId)
+    .order('created_at', { ascending: false });
+
+  if (error || !data || data.length === 0) {
     list.innerHTML = '<p class="no-comments">No comments yet — be the first to share your experience!</p>';
     return;
   }
-  list.innerHTML = comments.slice().reverse().map(c => `
+
+  list.innerHTML = data.map(c => `
     <div class="comment-item">
       <div class="comment-meta">
         <span class="comment-author">${escapeHtml(c.name)}</span>
-        <span class="comment-date">${c.date}</span>
+        <span class="comment-date">${new Date(c.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</span>
       </div>
       <p class="comment-text">${escapeHtml(c.text)}</p>
     </div>
   `).join('');
 }
 
-function submitComment(recipeId) {
+async function submitComment(recipeId) {
   const nameEl = document.getElementById('comment-name-' + recipeId);
   const textEl = document.getElementById('comment-text-' + recipeId);
   const name   = nameEl ? nameEl.value.trim() : '';
@@ -660,16 +672,21 @@ function submitComment(recipeId) {
     return;
   }
 
-  const comments = getComments(recipeId);
-  comments.push({
-    name,
-    text,
-    date: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }),
-  });
-  localStorage.setItem('zctb_comments_' + recipeId, JSON.stringify(comments));
+  const btn = document.querySelector('.comment-submit-btn');
+  if (btn) { btn.textContent = 'Posting...'; btn.disabled = true; }
+
+  const { error } = await db.from('comments').insert({ recipe_id: recipeId, name, text });
+
+  if (error) {
+    alert('Failed to post comment. Please try again.');
+    if (btn) { btn.textContent = 'Post Comment'; btn.disabled = false; }
+    return;
+  }
+
   nameEl.value = '';
   textEl.value = '';
-  renderComments(recipeId);
+  if (btn) { btn.textContent = 'Post Comment'; btn.disabled = false; }
+  await renderComments(recipeId);
 }
 
 /* ═══════════════════════════════════════════════════════
