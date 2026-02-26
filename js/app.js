@@ -581,47 +581,73 @@ function buildQuotes() {
 }
 
 /* ═══════════════════════════════════════════════════════
-   REACTIONS (LIKE / DISLIKE)
+   SESSION ID  (one permanent ID per browser)
 ═══════════════════════════════════════════════════════ */
-function getReactions(recipeId) {
-  try {
-    return JSON.parse(localStorage.getItem('zctb_reactions_' + recipeId)) || { likes: 0, dislikes: 0, userVote: null };
-  } catch { return { likes: 0, dislikes: 0, userVote: null }; }
-}
-
-function saveReactions(recipeId, data) {
-  localStorage.setItem('zctb_reactions_' + recipeId, JSON.stringify(data));
-}
-
-function handleVote(recipeId, vote) {
-  const data = getReactions(recipeId);
-  if (data.userVote === vote) {
-    // Toggle off — clicking same button again removes the vote
-    data[vote === 'like' ? 'likes' : 'dislikes']--;
-    data.userVote = null;
-  } else {
-    // Remove previous vote if switching
-    if (data.userVote) {
-      data[data.userVote === 'like' ? 'likes' : 'dislikes']--;
-    }
-    data[vote === 'like' ? 'likes' : 'dislikes']++;
-    data.userVote = vote;
+function getSessionId() {
+  let id = localStorage.getItem('zctb_session_id');
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem('zctb_session_id', id);
   }
-  saveReactions(recipeId, data);
-  updateReactionButtons(recipeId);
+  return id;
+}
+const SESSION_ID = getSessionId();
+
+/* ═══════════════════════════════════════════════════════
+   REACTIONS  (Supabase — shared across all visitors)
+═══════════════════════════════════════════════════════ */
+async function handleVote(recipeId, vote) {
+  const likeBtn    = document.getElementById('like-btn-' + recipeId);
+  const dislikeBtn = document.getElementById('dislike-btn-' + recipeId);
+  if (likeBtn)    likeBtn.disabled    = true;
+  if (dislikeBtn) dislikeBtn.disabled = true;
+
+  const { data: existing } = await db
+    .from('votes')
+    .select('vote')
+    .eq('recipe_id', recipeId)
+    .eq('session_id', SESSION_ID)
+    .maybeSingle();
+
+  if (existing && existing.vote === vote) {
+    // Same button clicked again — remove vote
+    await db.from('votes')
+      .delete()
+      .eq('recipe_id', recipeId)
+      .eq('session_id', SESSION_ID);
+  } else {
+    // New vote or switching vote
+    await db.from('votes').upsert(
+      { recipe_id: recipeId, session_id: SESSION_ID, vote },
+      { onConflict: 'recipe_id,session_id' }
+    );
+  }
+
+  await renderReactions(recipeId);
 }
 
-function updateReactionButtons(recipeId) {
-  const data     = getReactions(recipeId);
-  const likeBtn  = document.getElementById('like-btn-' + recipeId);
+async function renderReactions(recipeId) {
+  const [countsRes, myVoteRes] = await Promise.all([
+    db.from('votes').select('vote').eq('recipe_id', recipeId),
+    db.from('votes').select('vote').eq('recipe_id', recipeId).eq('session_id', SESSION_ID).maybeSingle(),
+  ]);
+
+  const counts   = countsRes.data || [];
+  const likes    = counts.filter(v => v.vote === 'like').length;
+  const dislikes = counts.filter(v => v.vote === 'dislike').length;
+  const userVote = myVoteRes.data ? myVoteRes.data.vote : null;
+
+  const likeBtn    = document.getElementById('like-btn-' + recipeId);
   const dislikeBtn = document.getElementById('dislike-btn-' + recipeId);
   if (!likeBtn || !dislikeBtn) return;
 
-  likeBtn.className = 'reaction-btn' + (data.userVote === 'like' ? ' liked' : '');
-  likeBtn.innerHTML = '👍 <span class="reaction-count">' + data.likes + '</span>';
+  likeBtn.className    = 'reaction-btn' + (userVote === 'like'    ? ' liked'    : '');
+  likeBtn.innerHTML    = '👍 <span class="reaction-count">' + likes    + '</span>';
+  likeBtn.disabled     = false;
 
-  dislikeBtn.className = 'reaction-btn' + (data.userVote === 'dislike' ? ' disliked' : '');
-  dislikeBtn.innerHTML = '👎 <span class="reaction-count">' + data.dislikes + '</span>';
+  dislikeBtn.className = 'reaction-btn' + (userVote === 'dislike' ? ' disliked' : '');
+  dislikeBtn.innerHTML = '👎 <span class="reaction-count">' + dislikes + '</span>';
+  dislikeBtn.disabled  = false;
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -786,8 +812,7 @@ function goRecipe(catId, recipeId) {
 
   document.getElementById('back-to-cat').onclick = () => goCategory(catId);
 
-  const reactData = getReactions(r.id);
-  const detail    = document.getElementById('recipe-detail');
+  const detail = document.getElementById('recipe-detail');
 
   detail.innerHTML = `
     <div class="recipe-hero">
@@ -819,15 +844,11 @@ function goRecipe(catId, recipeId) {
 
     <div class="recipe-reactions">
       <h3>Rate this recipe:</h3>
-      <button id="like-btn-${r.id}"
-              class="reaction-btn${reactData.userVote === 'like' ? ' liked' : ''}"
-              onclick="handleVote('${r.id}', 'like')">
-        👍 <span class="reaction-count">${reactData.likes}</span>
+      <button id="like-btn-${r.id}" class="reaction-btn" onclick="handleVote('${r.id}', 'like')" disabled>
+        👍 <span class="reaction-count">…</span>
       </button>
-      <button id="dislike-btn-${r.id}"
-              class="reaction-btn${reactData.userVote === 'dislike' ? ' disliked' : ''}"
-              onclick="handleVote('${r.id}', 'dislike')">
-        👎 <span class="reaction-count">${reactData.dislikes}</span>
+      <button id="dislike-btn-${r.id}" class="reaction-btn" onclick="handleVote('${r.id}', 'dislike')" disabled>
+        👎 <span class="reaction-count">…</span>
       </button>
     </div>
 
@@ -846,6 +867,7 @@ function goRecipe(catId, recipeId) {
     </div>
   `;
 
+  renderReactions(r.id);
   renderComments(r.id);
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
